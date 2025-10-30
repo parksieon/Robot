@@ -26,6 +26,13 @@ float free_var3 = 0.0f;
 float free_var4 = 0.0f;
 float free_var5 = 0.0f;
 
+float Lerror = 0.0f;
+float Ldeg = 0.0f;
+float Kp = 0.0f;
+float count =0.0f;
+float Ki =0.0f;
+float sum =0.0f;
+
 RobotData_t robotDataObj_RH;
 RobotData_t robotDataObj_LH;
 GravComp gravCompDataObj_RH;
@@ -69,8 +76,25 @@ uint8_t ackSignal = 0;
 float f_vector_input_RH = 0.0f;
 float f_vector_input_LH = 0.0f;
 
-float assist_level = 0.0f;
+float assist_level = 1.0f;
+
+
+
 /* -------------------------------------------------------- */
+/* --- PID 상태 전역/정적 변수 --- */
+static float Kd = 0.0f;              // D 게인(도/초 기준이면 그대로, 라디안 쓰면 맞게 조정)
+static float Lerror_prev = 0.0f;
+static float d_meas_lp = 0.0f;       // 저역통과된 미분(도/초)
+static const float dT = 0.001f;
+static const float DERIV_ALPHA = 0.15f; // 0~1, 작을수록 더 부드러움(지연↑)
+
+static const float U_MAX = 9.0f;     // 출력 포화(아래 Saturation과 일치)
+static const float I_MIN = -2000.0f; // 적분 한계(상황 맞게 조정)
+static const float I_MAX =  2000.0f;
+
+static bool user_first = true;
+
+
 
 /* -------------------- STATE FUNCTION -------------------- */
 static void StateOff_Run(void);
@@ -242,6 +266,8 @@ static void StateEnable_Run(void)
 			gravCompDataObj_LH.control_input = 0.0f;
 			impedanceCtrl_RH.control_input = 0.0f;
 			impedanceCtrl_LH.control_input = 0.0f;
+			f_vector_input_LH = 0.0f;
+			f_vector_input_RH = 0.0f;
 			StepCurr_RH.control_input = 0.0f;
 			StepCurr_LH.control_input = 0.0f;
 			UserDefinedCtrl_RH.control_input = 0.0f;
@@ -255,6 +281,8 @@ static void StateEnable_Run(void)
 			posCtrl_LH.control_input = 0.0f;
 			impedanceCtrl_RH.control_input = 0.0f;
 			impedanceCtrl_LH.control_input = 0.0f;
+			f_vector_input_LH = 0.0f;
+			f_vector_input_RH = 0.0f;
 			StepCurr_RH.control_input = 0.0f;
 			StepCurr_LH.control_input = 0.0f;
 			UserDefinedCtrl_RH.control_input = 0.0f;
@@ -270,6 +298,8 @@ static void StateEnable_Run(void)
 			posCtrl_LH.control_input = 0.0f;
 			gravCompDataObj_RH.control_input = 0.0f;
 			gravCompDataObj_LH.control_input = 0.0f;
+			f_vector_input_LH = 0.0f;
+			f_vector_input_RH = 0.0f;
 			StepCurr_RH.control_input = 0.0f;
 			StepCurr_LH.control_input = 0.0f;
 			UserDefinedCtrl_RH.control_input = 0.0f;
@@ -299,6 +329,8 @@ static void StateEnable_Run(void)
 		    gravCompDataObj_LH.control_input = 0.0f;
 		    impedanceCtrl_RH.control_input = 0.0f;
 		    impedanceCtrl_LH.control_input = 0.0f;
+			f_vector_input_LH = 0.0f;
+			f_vector_input_RH = 0.0f;
 		    UserDefinedCtrl_RH.control_input = 0.0f;
 		    UserDefinedCtrl_LH.control_input = 0.0f;
 
@@ -318,11 +350,71 @@ static void StateEnable_Run(void)
 		    }
 
 		} else if (controlMode == USER_DEFINED_CTRL) {   // 6 - User Defined Control
+		    // 1) 모드 진입시 상태 초기화 (한 번만)
+		    if (user_first) {
+		        sum = 0.0f;
+		        Lerror_prev = 0.0f;
+		        d_meas_lp = 0.0f;
+		        user_first = false;
+		    }
 
-			Ldeg = robotDataObj_LH.thighTheta_act;
-			Lerror = 30 - Ldeg;
-			sum += Lerror;
-			UserDefinedCtrl_LH.control_input = Kp * Lerror + sum*Ki;
+		    // 2) 측정값 & 오차(단위: 도)
+		    Ldeg   = robotDataObj_LH.thighTheta_act;      // [deg]
+		    Lerror = 30.0f - Ldeg;                        // 목표 30도
+
+		    // 3) D항: "측정치 기반 미분(= -dθ/dt)" 로 derivative kick 방지
+		    //    가. 자이로가 신뢰된다면 그 값을 그대로 사용 (단위 맞추기)
+		    //       - robotDataObj_LH.gyrZ 가 [deg/s] 라고 가정
+		    float dtheta_meas = robotDataObj_LH.gyrZ;     // [deg/s]
+
+		    //    나. 저역통과(1차 IIR)로 노이즈 완화
+		    d_meas_lp = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * dtheta_meas;
+
+		    //    다. D항은 측정 미분의 음수 (오차 미분 대신 측정치 미분 ⇒ kick 억제)
+		    float Dterm = -Kd * d_meas_lp;
+
+		    // (만약 자이로가 없다면) 오차 차분으로 대체:
+		    // float derr = (Lerror - Lerror_prev) / DT;
+		    // d_meas_lp  = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * derr;
+		    // float Dterm = Kd * d_meas_lp;  // 이때는 부호 반대가 아님(오차 미분이므로)
+
+		    // 4) P, I항
+		    float Pterm = Kp * Lerror;
+
+		    // 적분은 누적 전에 **안티윈드업** 처리:
+		    // (a) 기본: 포화 상태에서 '출력과 같은 부호의 오차'일 때 적분 중지
+		    // (출력 계산 전에 미리 예측 포화 검사하려면 아래 u_unsat로 판단)
+		    float Iterm = sum * Ki;
+
+		    // 5) 일단 비포화 출력 계산
+		    float u_unsat = Pterm + Iterm + Dterm;
+
+		    // 6) 포화 적용
+		    float u = u_unsat;
+		    if (u > U_MAX) u = U_MAX;
+		    if (u < -U_MAX) u = -U_MAX;
+
+		    // 7) 안티윈드업(기본형: 포화+동부호 시 적분 중지, 반대부호면 풀어줌)
+		    bool is_saturated = (u != u_unsat);
+		    if (is_saturated) {
+		        // 출력과 오차가 같은 부호이면 포화 유지 방향으로 더 밀지 않도록 적분 정지
+		        if (!((u > 0.0f && Lerror < 0.0f) || (u < 0.0f && Lerror > 0.0f))) {
+		            // 적분하지 않음
+		        } else {
+		            sum += Lerror * dT;   // 반대부호면 적분 허용(복원)
+		        }
+		    } else {
+		        sum += Lerror * dT;       // 정상적으로 적분
+		    }
+
+		    // 적분 한계(하드 클램프)
+		    if (sum > I_MAX) sum = I_MAX;
+		    if (sum < I_MIN) sum = I_MIN;
+
+		    // 8) 상태 업데이트 & 출력
+		    Lerror_prev = Lerror;
+		    UserDefinedCtrl_LH.control_input = u;  // 이후 공통 Saturation에서 한 번 더 제한됨
+
 
 		} else {
 			// default : SUIT H10 Assist Mode
@@ -332,6 +424,8 @@ static void StateEnable_Run(void)
 			gravCompDataObj_LH.control_input = 0.0f;
 			impedanceCtrl_RH.control_input = 0.0f;
 			impedanceCtrl_LH.control_input = 0.0f;
+			f_vector_input_LH = 0.0f;
+			f_vector_input_RH = 0.0f;
 			StepCurr_RH.control_input = 0.0f;
 			StepCurr_LH.control_input = 0.0f;
 			UserDefinedCtrl_RH.control_input = 0.0f;
