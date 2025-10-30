@@ -319,12 +319,10 @@ static void StateEnable_Run(void)
 
 		} else if (controlMode == USER_DEFINED_CTRL) {   // 6 - User Defined Control
 
-
-
-
-
-
-
+			Ldeg = robotDataObj_LH.thighTheta_act;
+			Lerror = 30 - Ldeg;
+			sum += Lerror;
+			UserDefinedCtrl_LH.control_input = Kp * Lerror + sum*Ki;
 
 		} else {
 			// default : SUIT H10 Assist Mode
