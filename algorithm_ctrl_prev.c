@@ -77,8 +77,6 @@ float assist_level = 1.0f;
 float   user_control_mode = 0.0f;
 #define PID_CONTROL_MODE 0
 #define GRAVITY_COMP_MODE 1
-#define ASSIST_REDUCING_SHOCK_MODE 2
-#define UNDERWATER_RESISTANCE_MODE 3
 
 /* --- PID_CONTROL_MODE --- */
 float Kp = 0.1f;
@@ -135,13 +133,6 @@ static inline float slew(float x_des, float x_prev, float di_max, float dt_ms){
     return x_des;
 }
 static inline float sgn(float x){ return (x>0)-(x<0); }
-
-
-/* --- ASSIST_REDUCING_SHOCK_MODE --- */
-
-
-/* --- UNDERWATER_RESISTANCE_MODE --- */
-
 
 
 
@@ -487,169 +478,6 @@ static void StateEnable_Run(void)
             float thetaR_deg = robotDataObj_RH.thighTheta_act;
             float thetaR_rad = thetaR_deg * 3.141592f / 180.0f;
             UserDefinedCtrl_RH.control_input = K * sinf(thetaR_rad);
-          } break;
-
-          case ASSIST_REDUCING_SHOCK_MODE:
-          {
-            /* ------------------------------------------ ASSIST_REDUCING_SHOCK_MODE ------------------------------------------------ */
-            
-            // 1) 양쪽 다리 각도 측정
-            float angle_RH = robotDataObj_RH.thighTheta_act;  // [deg]
-            float angle_LH = robotDataObj_LH.thighTheta_act;  // [deg]
-            float angle_diff = angle_RH - angle_LH;           // 각도 차이
-            
-            // 2) 각속도 측정 (내려가는 속도)
-            float vel_RH = robotDataObj_RH.gyrZ;  // [deg/s], 양수=신전(아래), 음수=굴곡(위)
-            float vel_LH = robotDataObj_LH.gyrZ;
-            
-            // 3) 중력보상 (기본 보조)
-            float theta_RH_rad = angle_RH * 3.141592f / 180.0f;
-            float theta_LH_rad = angle_LH * 3.141592f / 180.0f;
-            float grav_RH = K * sinf(theta_RH_rad);
-            float grav_LH = K * sinf(theta_LH_rad);
-            
-            // 4) 착지 직전 감지 및 위로 보조
-            float assist_RH = 0.0f;
-            float assist_LH = 0.0f;
-            
-            // 오른쪽 다리가 앞으로 나가며 내려오는 중 (착지 직전)
-            if (angle_diff > 20.0f && vel_RH > 10.0f) {
-                // 착지 직전: 다리를 위로 당김 (굴곡 방향 보조)
-                // 음수 = 굴곡 = 다리 위로
-                assist_RH = -0.3f * vel_RH;  // 속도에 비례하여 위로 당김
-            }
-            
-            // 왼쪽 다리가 앞으로 나가며 내려오는 중 (착지 직전)
-            if (angle_diff < -20.0f && vel_LH > 10.0f) {
-                assist_LH = -0.3f * vel_LH;  // 위로 당김
-            }
-            
-            // 5) 최종 제어 입력 = 중력보상 + 착지 직전 보조
-            UserDefinedCtrl_RH.control_input = grav_RH + assist_RH;
-            UserDefinedCtrl_LH.control_input = grav_LH + assist_LH;
-            
-            // 6) 다른 제어 입력 초기화
-            posCtrl_RH.control_input = 0.0f;
-            posCtrl_LH.control_input = 0.0f;
-            gravCompDataObj_RH.control_input = 0.0f;
-            gravCompDataObj_LH.control_input = 0.0f;
-            impedanceCtrl_RH.control_input = 0.0f;
-            impedanceCtrl_LH.control_input = 0.0f;
-            f_vector_input_RH = 0.0f;
-            f_vector_input_LH = 0.0f;
-            StepCurr_RH.control_input = 0.0f;
-            StepCurr_LH.control_input = 0.0f;
-          } break;
-          
-          case UNDERWATER_RESISTANCE_MODE:
-          {
-            /* ------------------------------------------ UNDERWATER_RESISTANCE_MODE ------------------------------------------------ */
-            
-            // 1) 각도 및 각속도 측정
-            float angle_RH = robotDataObj_RH.thighTheta_act;  // [deg]
-            float angle_LH = robotDataObj_LH.thighTheta_act;  // [deg]
-            float vel_RH = robotDataObj_RH.gyrZ;              // [deg/s]
-            float vel_LH = robotDataObj_LH.gyrZ;              // [deg/s]
-            
-            // 2) 속도 제한 (안전을 위한 현실적인 범위)
-            float vel_max = 80.0f;  // [deg/s] - 실제 보행에서 초과하기 어려운 값
-            vel_RH = fminf(fmaxf(vel_RH, -vel_max), vel_max);
-            vel_LH = fminf(fmaxf(vel_LH, -vel_max), vel_max);
-            
-            // 3) 속도 제곱 저항 (Drag Force: F = -c × v²)
-            //    물의 저항은 속도가 빠를수록 기하급수적 증가
-            //    계수를 안전한 범위로 조정 (0.008 → 0.0005)
-            float drag_coeff = 0.0005f;  // 저항 계수 (1/16으로 감소)
-            float drag_RH = -drag_coeff * vel_RH * fabsf(vel_RH);  // v²항, 방향 유지
-            float drag_LH = -drag_coeff * vel_LH * fabsf(vel_LH);
-            
-            // 4) 선형 점성 저항 (Viscous Damping: F = -b × v)
-            //    물의 점성으로 인한 저항 (느린 속도에서도 작용)
-            float viscous_coeff = 0.08f;  // 점성 계수 (0.12 → 0.08로 감소)
-            float viscous_RH = -viscous_coeff * vel_RH;
-            float viscous_LH = -viscous_coeff * vel_LH;
-            
-            // 5) 부력 효과 (Buoyancy)
-            //    물속에서 중력의 약 60-70%만 느껴짐
-            float theta_RH_rad = angle_RH * 3.141592f / 180.0f;
-            float theta_LH_rad = angle_LH * 3.141592f / 180.0f;
-            float buoyancy_factor = 0.35f;  // 중력의 35%만 보상 (65% 감소 효과)
-            float buoyancy_RH = buoyancy_factor * K * sinf(theta_RH_rad);
-            float buoyancy_LH = buoyancy_factor * K * sinf(theta_LH_rad);
-            
-            // 6) 부가질량 효과 (Added Mass Effect)
-            //    물속에서는 다리 주변의 물도 함께 움직여야 하므로 관성 증가
-            static float prev_vel_RH = 0.0f;
-            static float prev_vel_LH = 0.0f;
-            static bool underwater_init = false;
-            
-            // 최초 진입 시 초기화 (급격한 가속도 방지)
-            if (!underwater_init) {
-                prev_vel_RH = vel_RH;
-                prev_vel_LH = vel_LH;
-                underwater_init = true;
-            }
-            
-            // 가속도 계산
-            float accel_RH = (vel_RH - prev_vel_RH) / 0.001f;  // [deg/s²]
-            float accel_LH = (vel_LH - prev_vel_LH) / 0.001f;
-            
-            // 가속도 저역통과 필터 (노이즈 제거)
-            static float accel_filt_RH = 0.0f;
-            static float accel_filt_LH = 0.0f;
-            float alpha_accel = 0.1f;  // LPF 계수 (0~1, 작을수록 부드러움)
-            accel_filt_RH = alpha_accel * accel_filt_RH + (1.0f - alpha_accel) * accel_RH;
-            accel_filt_LH = alpha_accel * accel_filt_LH + (1.0f - alpha_accel) * accel_LH;
-            
-            // 상태 업데이트
-            prev_vel_RH = vel_RH;
-            prev_vel_LH = vel_LH;
-            
-            // 부가질량 계수 감소 (0.002 → 0.0001, 1/20)
-            float added_mass_coeff = 0.0001f;
-            float added_mass_RH = -added_mass_coeff * accel_filt_RH;
-            float added_mass_LH = -added_mass_coeff * accel_filt_LH;
-            
-            // 7) 난류 효과 (Turbulence)
-            //    빠른 움직임에서 불규칙한 저항 증가
-            float turbulence_coeff = 0.0003f;  // 계수 대폭 감소 (0.05 → 0.0003, 1/166)
-            float turbulence_threshold = 50.0f;  // 임계값 증가 (30 → 50)
-            float turbulence_RH = 0.0f;
-            float turbulence_LH = 0.0f;
-            
-            if (fabsf(vel_RH) > turbulence_threshold) {
-                turbulence_RH = -turbulence_coeff * vel_RH * fabsf(vel_RH);
-            }
-            if (fabsf(vel_LH) > turbulence_threshold) {
-                turbulence_LH = -turbulence_coeff * vel_LH * fabsf(vel_LH);
-            }
-            
-            // 8) 최종 출력 계산 및 안전 제한
-            float total_RH = buoyancy_RH + drag_RH + viscous_RH + added_mass_RH + turbulence_RH;
-            float total_LH = buoyancy_LH + drag_LH + viscous_LH + added_mass_LH + turbulence_LH;
-            
-            // Saturation 이전에 사전 제한 (±8A)
-            total_RH = fminf(fmaxf(total_RH, -8.0f), 8.0f);
-            total_LH = fminf(fmaxf(total_LH, -8.0f), 8.0f);
-            
-            UserDefinedCtrl_RH.control_input = total_RH;
-            UserDefinedCtrl_LH.control_input = total_LH;
-            
-            // 9) 디버깅용 변수 (실시간 모니터링)
-            free_var4 = drag_RH + viscous_RH + turbulence_RH;  // 총 저항력
-            free_var5 = buoyancy_RH;                           // 부력
-            
-            // 10) 다른 제어 입력 초기화
-            posCtrl_RH.control_input = 0.0f;
-            posCtrl_LH.control_input = 0.0f;
-            gravCompDataObj_RH.control_input = 0.0f;
-            gravCompDataObj_LH.control_input = 0.0f;
-            impedanceCtrl_RH.control_input = 0.0f;
-            impedanceCtrl_LH.control_input = 0.0f;
-            f_vector_input_RH = 0.0f;
-            f_vector_input_LH = 0.0f;
-            StepCurr_RH.control_input = 0.0f;
-            StepCurr_LH.control_input = 0.0f;
           } break;
         }
 

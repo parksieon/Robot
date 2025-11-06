@@ -74,11 +74,6 @@ float assist_level = 1.0f;
 
 
 /* -------------------------------------------------------- */
-float   user_control_mode = 0.0f;
-#define PID_CONTROL_MODE 0
-#define GRAVITY_COMP_MODE 1
-#define ASSIST_REDUCING_SHOCK_MODE 2
-#define UNDERWATER_RESISTANCE_MODE 3
 
 /* --- PID_CONTROL_MODE --- */
 float Kp = 0.1f;
@@ -89,7 +84,7 @@ float Lerror = 0.0f;
 float Ldeg = 0.0f;
 float count =0.0f;
 float sum =0.0f;
-float K = 0.0f;
+float K = 0.3f;
 
 static float Lerror_prev = 0.0f;
 static float d_meas_lp = 0.0f;       // 저역통과된 미분(도/초)
@@ -139,6 +134,19 @@ static inline float sgn(float x){ return (x>0)-(x<0); }
 
 /* --- ASSIST_REDUCING_SHOCK_MODE --- */
 
+float assist_RH = 0.0f;
+float assist_LH = 0.0f;
+float grav_RH;
+float grav_LH;
+float assist_gain = 0.25f;        // 보조력 계수
+
+float angle_threshold = 10.0f;   // 각도 차이 임계값 (deg)
+float vel_threshold = 3.0f;      // 각속도 임계값 (deg/s)
+
+// 수치 미분을 위한 이전 각도 저장
+static float thighTheta_RH_prev = 0.0f;
+static float thighTheta_LH_prev = 0.0f;
+static bool first_run_assist = true;  // 최초 실행 플래그
 
 /* --- UNDERWATER_RESISTANCE_MODE --- */
 
@@ -309,7 +317,7 @@ static void StateEnable_Run(void)
             PvectorTrigger(&pvectorObj_LH, &MotionMap_File, &robotDataObj_LH, &pVectorTrig_LH, &MotionMap_ID_LH, LH_MOTOR);
             PositionCtrl_Sample(&robotDataObj_LH, &posCtrl_LH);
          }
-         
+
          gravCompDataObj_RH.control_input = 0.0f;
          gravCompDataObj_LH.control_input = 0.0f;
          impedanceCtrl_RH.control_input = 0.0f;
@@ -398,162 +406,86 @@ static void StateEnable_Run(void)
           }
 
       } else if (controlMode == USER_DEFINED_CTRL) {   // 6 - User Defined Control
-        
-        switch ((uint8_t)user_control_mode) {
-          case PID_CONTROL_MODE:
-          {
-            /* ------------------------------------------ PID_CONTROL_MODE ------------------------------------------------ */
-            // 1) 모드 진입시 상태 초기화 (한 번만)
-            if (user_first) {
-              sum = 0.0f;
-              Lerror_prev = 0.0f;
-              d_meas_lp = 0.0f;
-              user_first = false;
-            }
 
-            // 2) 측정값 & 오차(단위: 도)
-            Ldeg   = robotDataObj_LH.thighTheta_act;      // [deg]
-            Lerror = 30.0f - Ldeg;                        // 목표 30도
+    	  // 1) 양쪽 다리 각도 측정
+    	              float angle_RH = robotDataObj_RH.thighTheta_act;  // [deg]
+    	              float angle_LH = robotDataObj_LH.thighTheta_act;  // [deg]
+    	              float angle_diff = angle_RH - angle_LH;           // 각도 차이
+    	              float angle_diff_abs = fabsf(angle_diff);         // 절대값
 
-            // 3) D항: "측정치 기반 미분(= -dθ/dt)" 로 derivative kick 방지
-            //    가. 자이로가 신뢰된다면 그 값을 그대로 사용 (단위 맞추기)
-            //       - robotDataObj_LH.gyrZ 가 [deg/s] 라고 가정
-            float dtheta_meas = robotDataObj_LH.gyrZ;     // [deg/s]
+    	              // 2) 각속도 계산 - 수치 미분 (NOT gyroscope!)
+    	              float angularVelocity_RH = 0.0f;  // [deg/s]
+    	              float angularVelocity_LH = 0.0f;  // [deg/s]
+    	              const float dt = 0.001f;          // 1ms = 0.001s
 
-            //    나. 저역통과(1차 IIR)로 노이즈 완화
-            d_meas_lp = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * dtheta_meas;
+    	              // 최초 실행시 이전 값 초기화
+    	              if (first_run_assist) {
+    	                  thighTheta_RH_prev = angle_RH;
+    	                  thighTheta_LH_prev = angle_LH;
+    	                  first_run_assist = false;
+    	              } else {
+    	                  // 수치 미분: (현재 각도 - 이전 각도) / dt
+    	                  angularVelocity_RH = (angle_RH - thighTheta_RH_prev) / dt;
+    	                  angularVelocity_LH = (angle_LH - thighTheta_LH_prev) / dt;
+    	              }
 
-            //    다. D항은 측정 미분의 음수 (오차 미분 대신 측정치 미분 ⇒ kick 억제)
-            float Dterm = -Kd * d_meas_lp;
+    	              // 이전 각도 업데이트 (다음 루프를 위해)
+    	              thighTheta_RH_prev = angle_RH;
+    	              thighTheta_LH_prev = angle_LH;
 
-            // (만약 자이로가 없다면) 오차 차분으로 대체:
-            // float derr = (Lerror - Lerror_prev) / DT;
-            // d_meas_lp  = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * derr;
-            // float Dterm = Kd * d_meas_lp;  // 이때는 부호 반대가 아님(오차 미분이므로)
+    	              // 각속도 저역통과 필터 (노이즈 제거)
+    	              static float angularVel_RH_filtered = 0.0f;
+    	              static float angularVel_LH_filtered = 0.0f;
+    	              const float alpha_vel = 0.3f;  // 필터 계수 (0~1, 작을수록 부드러움)
+    	              angularVel_RH_filtered = alpha_vel * angularVel_RH_filtered + (1.0f - alpha_vel) * angularVelocity_RH;
+    	              angularVel_LH_filtered = alpha_vel * angularVel_LH_filtered + (1.0f - alpha_vel) * angularVelocity_LH;
 
-            // 4) P, I항
-            float Pterm = Kp * Lerror;
+    	              // 필터링된 각속도 사용
+    	              float vel_RH = angularVel_RH_filtered;  // [deg/s], 양수=신전(아래), 음수=굴곡(위)
+    	              float vel_LH = angularVel_LH_filtered;
 
-            // 적분은 누적 전에 **안티윈드업** 처리:
-            // (a) 기본: 포화 상태에서 '출력과 같은 부호의 오차'일 때 적분 중지
-            // (출력 계산 전에 미리 예측 포화 검사하려면 아래 u_unsat로 판단)
-            float Iterm = sum * Ki;
+    	              // 3) 중력보상 (기본 보조)
+    	              float theta_RH_rad = angle_RH * 3.141592f / 180.0f;
+    	              float theta_LH_rad = angle_LH * 3.141592f / 180.0f;
+    	              grav_RH = K * sinf(theta_RH_rad);
+    	              grav_LH = K * sinf(theta_LH_rad);
 
-            // 5) 일단 비포화 출력 계산
-            float u_unsat = Pterm + Iterm + Dterm;
+    	              // 4) 착지 직전 감지 및 위로 보조
+    	              assist_RH = 0.0f;
+    	              assist_LH = 0.0f;
+    	              bool landing_detect_RH = false;
+    	              bool landing_detect_LH = false;
 
-            // 6) 포화 적용
-            float u = u_unsat;
-            if (u > U_MAX) u = U_MAX;
-            if (u < -U_MAX) u = -U_MAX;
+    	              // 착지 조건: 앞으로 나가고(각도 차이) + 내려가는 중(양수 각속도)
+    	              // 오른쪽 다리가 앞으로 나가며 내려오는 중 (착지 직전)
+    	              if (angle_diff > angle_threshold && vel_RH > vel_threshold) {
+    	                  landing_detect_RH = true;
+    	                  // 착지 직전: 다리를 위로 당김 (굴곡 방향 보조)
+    	                  // 음수 = 굴곡 = 다리 위로
+    	                  assist_RH = -assist_gain * vel_RH;  // 속도에 비례하여 위로 당김
+    	              }
 
-            // 7) 안티윈드업(기본형: 포화+동부호 시 적분 중지, 반대부호면 풀어줌)
-            bool is_saturated = (u != u_unsat);
-            if (is_saturated) {
-              // 출력과 오차가 같은 부호이면 포화 유지 방향으로 더 밀지 않도록 적분 정지
-              if (!((u > 0.0f && Lerror < 0.0f) || (u < 0.0f && Lerror > 0.0f))) {
-                  // 적분하지 않음
-              } else {
-                  sum += Lerror * dT;   // 반대부호면 적분 허용(복원)
-              }
-            } else {
-              sum += Lerror * dT;       // 정상적으로 적분
-            }
+    	              // 왼쪽 다리가 앞으로 나가며 내려오는 중 (착지 직전)
+    	              if (angle_diff < -angle_threshold && vel_LH > vel_threshold) {
+    	                  landing_detect_LH = true;
+    	                  assist_LH = -assist_gain * vel_LH;  // 위로 당김
+    	              }
 
-            // 적분 한계(하드 클램프)
-            if (sum > I_MAX) sum = I_MAX;
-            if (sum < I_MIN) sum = I_MIN;
+    	              // 5) 최종 제어 입력 = 중력보상 + 착지 직전 보조
+    	              UserDefinedCtrl_RH.control_input = grav_RH + assist_RH;
+    	              UserDefinedCtrl_LH.control_input = grav_LH + assist_LH;
 
-            // 8) 상태 업데이트 & 출력
-            Lerror_prev = Lerror;
-            UserDefinedCtrl_LH.control_input = u;  // 이후 공통 Saturation에서 한 번 더 제한됨
-          } break;
-
-          case GRAVITY_COMP_MODE:
-          {
-            /* ------------------------------------------ GRAVITY_COMP_MODE ------------------------------------------------ */
-            // 왼쪽 허벅지 각도 (deg 단위라면 rad로 변환)
-            float theta_deg = robotDataObj_LH.thighTheta_act;
-            float theta_rad = theta_deg * 3.141592f / 180.0f;
-
-            // 중력보상 토크 계산 (단순화된 모델)
-            float torque = K * sinf(theta_rad) * assist_level;
-
-            // 실제로는 토크 대신 전류 제어 입력으로 보낼 수도 있음
-            UserDefinedCtrl_LH.control_input = torque;
-
-            // 오른쪽 다리에도 적용하려면 동일하게 복사
-            float thetaR_deg = robotDataObj_RH.thighTheta_act;
-            float thetaR_rad = thetaR_deg * 3.141592f / 180.0f;
-            UserDefinedCtrl_RH.control_input = K * sinf(thetaR_rad);
-          } break;
-
-          case ASSIST_REDUCING_SHOCK_MODE:
-          {
-            /* ------------------------------------------ ASSIST_REDUCING_SHOCK_MODE ------------------------------------------------ */
-            
-            // 각도 차이 계산
-            float angle_diff = robotDataObj_RH.thighTheta_act - robotDataObj_LH.thighTheta_act;
-            
-            // 중력보상
-            float grav_RH = K * sinf(robotDataObj_RH.thighTheta_act * 3.141592f / 180.0f);
-            float grav_LH = K * sinf(robotDataObj_LH.thighTheta_act * 3.141592f / 180.0f);
-            
-            // 착지 직전 위로 보조 (오른쪽)
-            if (angle_diff > 20.0f && robotDataObj_RH.gyrZ > 10.0f)
-                UserDefinedCtrl_RH.control_input = grav_RH - 0.3f * robotDataObj_RH.gyrZ;
-            else
-                UserDefinedCtrl_RH.control_input = grav_RH;
-            
-            // 착지 직전 위로 보조 (왼쪽)
-            if (angle_diff < -20.0f && robotDataObj_LH.gyrZ > 10.0f)
-                UserDefinedCtrl_LH.control_input = grav_LH - 0.3f * robotDataObj_LH.gyrZ;
-            else
-                UserDefinedCtrl_LH.control_input = grav_LH;
-            
-            // 다른 제어 입력 초기화
-            posCtrl_RH.control_input = 0.0f;
-            posCtrl_LH.control_input = 0.0f;
-            gravCompDataObj_RH.control_input = 0.0f;
-            gravCompDataObj_LH.control_input = 0.0f;
-            impedanceCtrl_RH.control_input = 0.0f;
-            impedanceCtrl_LH.control_input = 0.0f;
-            f_vector_input_RH = 0.0f;
-            f_vector_input_LH = 0.0f;
-            StepCurr_RH.control_input = 0.0f;
-            StepCurr_LH.control_input = 0.0f;
-          } break;
-
-          case UNDERWATER_RESISTANCE_MODE:
-          {
-            /* ------------------------------------------ UNDERWATER_RESISTANCE_MODE ------------------------------------------------ */
-            
-            // 물의 저항력 = 속도에 비례하는 댐핑 (Damping = -c × v)
-            float resistance_RH = -0.15f * robotDataObj_RH.gyrZ;  // 저항 계수 0.15
-            float resistance_LH = -0.15f * robotDataObj_LH.gyrZ;
-            
-            // 부력 효과 = 중력의 50% 감소 (물속에서 가벼워지는 느낌)
-            float buoyancy_RH = 0.5f * K * sinf(robotDataObj_RH.thighTheta_act * 3.141592f / 180.0f);
-            float buoyancy_LH = 0.5f * K * sinf(robotDataObj_LH.thighTheta_act * 3.141592f / 180.0f);
-            
-            // 최종 출력 = 부력 + 저항력
-            UserDefinedCtrl_RH.control_input = buoyancy_RH + resistance_RH;
-            UserDefinedCtrl_LH.control_input = buoyancy_LH + resistance_LH;
-            
-            // 다른 제어 입력 초기화
-            posCtrl_RH.control_input = 0.0f;
-            posCtrl_LH.control_input = 0.0f;
-            gravCompDataObj_RH.control_input = 0.0f;
-            gravCompDataObj_LH.control_input = 0.0f;
-            impedanceCtrl_RH.control_input = 0.0f;
-            impedanceCtrl_LH.control_input = 0.0f;
-            f_vector_input_RH = 0.0f;
-            f_vector_input_LH = 0.0f;
-            StepCurr_RH.control_input = 0.0f;
-            StepCurr_LH.control_input = 0.0f;
-          } break;
-        }
-
+    	              // 6) 다른 제어 입력 초기화
+    	              posCtrl_RH.control_input = 0.0f;
+    	              posCtrl_LH.control_input = 0.0f;
+    	              gravCompDataObj_RH.control_input = 0.0f;
+    	              gravCompDataObj_LH.control_input = 0.0f;
+    	              impedanceCtrl_RH.control_input = 0.0f;
+    	              impedanceCtrl_LH.control_input = 0.0f;
+    	              f_vector_input_RH = 0.0f;
+    	              f_vector_input_LH = 0.0f;
+    	              StepCurr_RH.control_input = 0.0f;
+    	              StepCurr_LH.control_input = 0.0f;
       } else {
          // default : SUIT H10 Assist Mode
          posCtrl_RH.control_input = 0.0f;
@@ -741,7 +673,7 @@ static void InitGravityCompensation(GravComp* gravComp)
 
 static void GravityCompensation_Sample(GravComp* gravComp, RobotData_t* robotDataObj)
 {
-   if (robotDataObj->thighTheta_act > 0) 
+   if (robotDataObj->thighTheta_act > 0)
    {
       gravComp->grav_comp_torque =  gravComp->grav_gain * (sin((robotDataObj->thighTheta_act) * M_PI / 180));
       gravComp->f_grav_comp_torque = gravComp->grav_alpha * gravComp->f_grav_comp_torque + (1 - gravComp->grav_alpha) * gravComp->grav_comp_torque;
@@ -758,7 +690,7 @@ static void GravityCompensation_Sample(GravComp* gravComp, RobotData_t* robotDat
 static void InitImpedanceSetting(ImpedanceCtrl* impedanceCtrl)
 {
    memset(impedanceCtrl, 0, sizeof(*impedanceCtrl));
-   
+
    impedanceCtrl->epsilon = 5.0f * M_PI / 180.0f;
    impedanceCtrl->Kp = 1.5f;
    impedanceCtrl->Kd = 0.2f;
