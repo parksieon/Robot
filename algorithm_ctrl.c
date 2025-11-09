@@ -1,4 +1,5 @@
 #include "algorithm_ctrl.h"
+#include "trajectory_generator.h"
 
 /* ------------------- Default Variables ------------------ */
 TaskObj_t algorithmCtrlTask;
@@ -26,12 +27,7 @@ float free_var3 = 0.0f;
 float free_var4 = 0.0f;
 float free_var5 = 0.0f;
 
-float Lerror = 0.0f;
-float Ldeg = 0.0f;
-float Kp = 0.0f;
-float count =0.0f;
-float Ki =0.0f;
-float sum =0.0f;
+
 
 RobotData_t robotDataObj_RH;
 RobotData_t robotDataObj_LH;
@@ -79,10 +75,16 @@ float f_vector_input_LH = 0.0f;
 float assist_level = 1.0f;
 
 
+/* --- PID_CONTROL_MODE --- */
+float Lerror = 0.0f;
+float Ldeg = 0.0f;
+float Kp = 0.0f;              // PID 제어용 비례 게인
+float count = 0.0f;
+float Ki = 0.0f;            // PID 제어용 적분 게인
+float sum = 0.0f;
+float K = 0.0f;
+float Kd = 0.0f;              // D 게인(도/초 기준이면 그대로, 라디안 쓰면 맞게 조정)
 
-/* -------------------------------------------------------- */
-/* --- PID 상태 전역/정적 변수 --- */
-static float Kd = 0.0f;              // D 게인(도/초 기준이면 그대로, 라디안 쓰면 맞게 조정)
 static float Lerror_prev = 0.0f;
 static float d_meas_lp = 0.0f;       // 저역통과된 미분(도/초)
 static const float dT = 0.001f;
@@ -94,6 +96,14 @@ static const float I_MAX =  2000.0f;
 
 static bool user_first = true;
 
+/* --- Trajectory Generator --- */
+static TrajectoryGenerator_t trajectory_gen;  // 사인파 궤적 생성기
+
+/* --- Error Filtering Function f(e,t) Parameters --- */
+static float epsilon_user = 5.0f;      // Dead-zone 크기 [deg] - 임피던스 제어용
+static float lambda_user = 0.5f;       // Compliance 계수 (0~1) - 0:강성, 1:유연
+static float ef_user = 0.0f;           // 필터링된 오차 f(e)
+static float ef_diff_user = 0.0f;      // 필터링된 오차의 미분 df(e)/dt
 
 
 /* -------------------- STATE FUNCTION -------------------- */
@@ -261,7 +271,7 @@ static void StateEnable_Run(void)
 				PvectorTrigger(&pvectorObj_LH, &MotionMap_File, &robotDataObj_LH, &pVectorTrig_LH, &MotionMap_ID_LH, LH_MOTOR);
 				PositionCtrl_Sample(&robotDataObj_LH, &posCtrl_LH);
 			}
-			
+
 			gravCompDataObj_RH.control_input = 0.0f;
 			gravCompDataObj_LH.control_input = 0.0f;
 			impedanceCtrl_RH.control_input = 0.0f;
@@ -350,71 +360,96 @@ static void StateEnable_Run(void)
 		    }
 
 		} else if (controlMode == USER_DEFINED_CTRL) {   // 6 - User Defined Control
-		    // 1) 모드 진입시 상태 초기화 (한 번만)
+		    // ========================================================================
+		    // USER DEFINED CONTROL: PD Controller with f(e,t) + Sine Wave Trajectory
+		    // ========================================================================
+		    // 라이브러리 사용: trajectory_generator.h
+		    // 목표: θ_ref(t) = 15·sin(2π·0.2·t) + 15  →  0° ~ 30° 범위 (5초 주기)
+		    // 에러 필터링: f(e,t) = λ·e + (1-λ)·sign(e)·max(|e| - ε, 0)
+		    // 제어: u = Kp·f(e) + Kd·df(e)/dt
+		    // ========================================================================
+
+		    // 1) 모드 진입 시 초기화
 		    if (user_first) {
-		        sum = 0.0f;
+		        // 궤적 생성기 초기화
+		        // 파라미터: 진폭 15°, 주파수 0.2Hz, 오프셋 15°, 샘플링 시간 1ms
+		        TrajectoryGenerator_Init(&trajectory_gen, 15.0f, 0.2f, 15.0f, 0.001f);
+		        
 		        Lerror_prev = 0.0f;
-		        d_meas_lp = 0.0f;
+		        ef_user = 0.0f;      // f(e) 초기화
+		        ef_diff_user = 0.0f; // df(e)/dt 초기화
 		        user_first = false;
 		    }
 
-		    // 2) 측정값 & 오차(단위: 도)
-		    Ldeg   = robotDataObj_LH.thighTheta_act;      // [deg]
-		    Lerror = 30.0f - Ldeg;                        // 목표 30도
+		    // 2) 사인파 목표 궤적 생성
+		    float theta_ref = TrajectoryGenerator_GetPosition(&trajectory_gen);      // 목표 위치 [deg]
+		    float theta_ref_dot = TrajectoryGenerator_GetVelocity(&trajectory_gen);  // 목표 속도 [deg/s]
 
-		    // 3) D항: "측정치 기반 미분(= -dθ/dt)" 로 derivative kick 방지
-		    //    가. 자이로가 신뢰된다면 그 값을 그대로 사용 (단위 맞추기)
-		    //       - robotDataObj_LH.gyrZ 가 [deg/s] 라고 가정
-		    float dtheta_meas = robotDataObj_LH.gyrZ;     // [deg/s]
+		    // 3) 측정값 & 오차 계산 [deg]
+		    Ldeg = robotDataObj_LH.thighTheta_act;        // 현재 각도 [deg]
+		    Lerror = theta_ref - Ldeg;                     // 오차 = 목표 - 현재
 
-		    //    나. 저역통과(1차 IIR)로 노이즈 완화
-		    d_meas_lp = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * dtheta_meas;
+		    // ========================================================================
+		    // 4) Error Filtering Function f(e,t) 계산
+		    // ========================================================================
+		    // f(e,t) = λ·e + (1-λ)·sign(e)·max(|e| - ε, 0)
+		    // 
+		    // 파라미터:
+		    //   λ (lambda_user) = 0.5 : Compliance 계수 (0=강성, 1=유연)
+		    //   ε (epsilon_user) = 5.0° : Dead-zone 크기
+		    // 
+		    // 동작:
+		    //   |오차| < 5° → f(e) ≈ λ·e (작은 복원력, 부드러운 움직임)
+		    //   |오차| ≥ 5° → f(e) 증가 (큰 복원력, 위치 보정)
+		    // ========================================================================
+		    
+		    // Step 1: 부호와 절대값 추출
+		    float abs_e = (Lerror >= 0.0f) ? Lerror : -Lerror;  // |e|
+		    float sign_e = (Lerror >= 0.0f) ? 1.0f : -1.0f;     // sign(e)
+		    
+		    // Step 2: Dead-zone 처리 - max(|e| - ε, 0)
+		    float deadzone_output = abs_e - epsilon_user;       // |e| - ε
+		    if (deadzone_output < 0.0f) deadzone_output = 0.0f; // max(..., 0)
+		    
+		    // Step 3: f(e,t) 계산
+		    float ef_new = lambda_user * Lerror 
+		                   + (1.0f - lambda_user) * sign_e * deadzone_output;
+		    
+		    // Step 4: df(e)/dt 계산 (수치 미분)
+		    float ef_diff_new = (ef_new - ef_user) / dT;  // [deg/s]
+		    
+		    // Step 5: 필터링된 값 업데이트
+		    ef_user = ef_new;
+		    ef_diff_user = ef_diff_new;
 
-		    //    다. D항은 측정 미분의 음수 (오차 미분 대신 측정치 미분 ⇒ kick 억제)
-		    float Dterm = -Kd * d_meas_lp;
+		    // 5) PD 제어 입력 계산 (필터링된 오차 사용)
+		    float Pterm = Kp * ef_user;           // 비례항: Kp·f(e)
+		    float Dterm = Kd * ef_diff_user;      // 미분항: Kd·df(e)/dt
 
-		    // (만약 자이로가 없다면) 오차 차분으로 대체:
-		    // float derr = (Lerror - Lerror_prev) / DT;
-		    // d_meas_lp  = DERIV_ALPHA * d_meas_lp + (1.0f - DERIV_ALPHA) * derr;
-		    // float Dterm = Kd * d_meas_lp;  // 이때는 부호 반대가 아님(오차 미분이므로)
+		    // 6) 제어 출력 계산 및 포화
+		    float u = Pterm + Dterm;
+		    // 포화 제한 (필요시 활성화)
+		    // if (u > U_MAX) u = U_MAX;
+		    // if (u < -U_MAX) u = -U_MAX;
 
-		    // 4) P, I항
-		    float Pterm = Kp * Lerror;
+		    // 7) 시간 업데이트
+		    TrajectoryGenerator_Update(&trajectory_gen);  // 시간 진행
 
-		    // 적분은 누적 전에 **안티윈드업** 처리:
-		    // (a) 기본: 포화 상태에서 '출력과 같은 부호의 오차'일 때 적분 중지
-		    // (출력 계산 전에 미리 예측 포화 검사하려면 아래 u_unsat로 판단)
-		    float Iterm = sum * Ki;
+		    // 8) 제어 입력 출력
+		    UserDefinedCtrl_LH.control_input = u;
 
-		    // 5) 일단 비포화 출력 계산
-		    float u_unsat = Pterm + Iterm + Dterm;
-
-		    // 6) 포화 적용
-		    float u = u_unsat;
-		    if (u > U_MAX) u = U_MAX;
-		    if (u < -U_MAX) u = -U_MAX;
-
-		    // 7) 안티윈드업(기본형: 포화+동부호 시 적분 중지, 반대부호면 풀어줌)
-		    bool is_saturated = (u != u_unsat);
-		    if (is_saturated) {
-		        // 출력과 오차가 같은 부호이면 포화 유지 방향으로 더 밀지 않도록 적분 정지
-		        if (!((u > 0.0f && Lerror < 0.0f) || (u < 0.0f && Lerror > 0.0f))) {
-		            // 적분하지 않음
-		        } else {
-		            sum += Lerror * dT;   // 반대부호면 적분 허용(복원)
-		        }
-		    } else {
-		        sum += Lerror * dT;       // 정상적으로 적분
-		    }
-
-		    // 적분 한계(하드 클램프)
-		    if (sum > I_MAX) sum = I_MAX;
-		    if (sum < I_MIN) sum = I_MIN;
-
-		    // 8) 상태 업데이트 & 출력
-		    Lerror_prev = Lerror;
-		    UserDefinedCtrl_LH.control_input = u;  // 이후 공통 Saturation에서 한 번 더 제한됨
-
+		    // 9) 다른 제어 모드 초기화
+		    posCtrl_RH.control_input = 0.0f;
+		    posCtrl_LH.control_input = 0.0f;
+		    gravCompDataObj_RH.control_input = 0.0f;
+		    gravCompDataObj_LH.control_input = 0.0f;
+		    impedanceCtrl_RH.control_input = 0.0f;
+		    impedanceCtrl_LH.control_input = 0.0f;
+		    StepCurr_RH.control_input = 0.0f;
+		    StepCurr_LH.control_input = 0.0f;
+		    UserDefinedCtrl_RH.control_input = 0.0f;
+		    f_vector_input_LH = 0.0f;
+		    f_vector_input_RH = 0.0f;
 
 		} else {
 			// default : SUIT H10 Assist Mode
@@ -603,7 +638,7 @@ static void InitGravityCompensation(GravComp* gravComp)
 
 static void GravityCompensation_Sample(GravComp* gravComp, RobotData_t* robotDataObj)
 {
-	if (robotDataObj->thighTheta_act > 0) 
+	if (robotDataObj->thighTheta_act > 0)
 	{
 		gravComp->grav_comp_torque =  gravComp->grav_gain * (sin((robotDataObj->thighTheta_act) * M_PI / 180));
 		gravComp->f_grav_comp_torque = gravComp->grav_alpha * gravComp->f_grav_comp_torque + (1 - gravComp->grav_alpha) * gravComp->grav_comp_torque;
@@ -620,7 +655,7 @@ static void GravityCompensation_Sample(GravComp* gravComp, RobotData_t* robotDat
 static void InitImpedanceSetting(ImpedanceCtrl* impedanceCtrl)
 {
 	memset(impedanceCtrl, 0, sizeof(*impedanceCtrl));
-	
+
 	impedanceCtrl->epsilon = 5.0f * M_PI / 180.0f;
 	impedanceCtrl->Kp = 1.5f;
 	impedanceCtrl->Kd = 0.2f;

@@ -74,7 +74,7 @@ float assist_level = 1.0f;
 
 
 /* -------------------------------------------------------- */
-float   user_control_mode = 0.0f;
+uint8_t user_control_mode = 1;
 #define PID_CONTROL_MODE 0
 #define GRAVITY_COMP_MODE 1
 
