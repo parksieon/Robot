@@ -148,6 +148,16 @@ float count_R = -1.0f;
 float count_L = 0.0f;
 int control_M = 0;
 
+// assist
+float epsilon = 0.5f;  // 선형 보정 상수
+
+float ANGLE_EPSILON = 0.1f;  // 약 5.7도
+float MAX_GAIN = 10.0f;      // gain 상한
+
+float w_threshold = -5.0f;
+float gain_vel_threshold = 0.5f;
+float gain_angle_threshold = 0.5f;
+
 /* -------------------- STATE FUNCTION -------------------- */
 static void StateOff_Run(void);
 
@@ -474,6 +484,34 @@ static void StateEnable_Run(void)
 
 			    i_prev_R = iR_cmd; di_prev_R = di_R;
 			    i_prev_L = iL_cmd; di_prev_L = di_L;
+
+			/* 20도 -> 0도 될 때 저항 */
+				if (w_est_R < w_threshold)
+				{
+					float abs_w_R = sabsf(w_est_R);
+					float gain_vel_R = abs_w_R / (abs_w_R + epsilon);
+
+					float abs_th_R = sabsf(th_R);
+    				float gain_angle_R = 1.0f / (abs_th_R + ANGLE_EPSILON);
+
+					float gain_R = gain_vel_R * gain_vel_threshold + gain_angle_R * gain_angle_threshold;
+					gain_R = clampf(gain_R, 1.0f, MAX_GAIN);
+
+					iR_cmd += gain_R;
+				}
+				if (w_est_L < w_threshold)
+				{
+					float abs_w_L = sabsf(w_est_L);
+					float gain_vel_L = abs_w_L / (abs_w_L + epsilon);
+
+					float abs_th_L = sabsf(th_L);
+    				float gain_angle_L = 1.0f / (abs_th_L + ANGLE_EPSILON);
+
+    				float gain_L = gain_vel_L * gain_vel_threshold + gain_angle_L * gain_angle_threshold;
+    				gain_L = clampf(gain_L, 1.0f, MAX_GAIN);
+
+					iL_cmd += gain_L;
+				}
 
 			    /* 7) 사용자 정의 전류 출력 (최종 합산/assist_level/±9A 포화는 기존 함수) */
 			    UserDefinedCtrl_RH.control_input = iR_cmd;

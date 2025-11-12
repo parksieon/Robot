@@ -68,20 +68,17 @@ uint8_t ackSignal = 0;
 float f_vector_input_RH = 0.0f;
 float f_vector_input_LH = 0.0f;
 
-float assist_level = 0.008f; // *** FIX: 1.0f -> 0.008f로 변경 (사용자 튜닝값 적용) ***
+float assist_level = 0.008f;
 
-// *** 추가: 사용자 정의 모드를 위한 실시간 변경 가능 중력보상 게인 K ***
-float user_defined_K = 0.5f; // K 상수를 #define 대신 전역 변수로 선언 (초기값 0.5f)
-
-// *** 추가: 사용자 정의 충격 완화(보조) 알고리즘용 게인 ***
-// *** FIX: 좌우 게인 및 민감도 분리 ***
-float assist_gain_RH = 1.5f;      // 오른쪽 보조 게인 (값은 튜닝 필요)
-float assist_gain_LH = 1.5f;      // 왼쪽 보조 게인 (값은 튜닝 필요)
-float angle_threshold_RH = 10.0f; // 오른쪽 착지 감지 다리 각도 차이 (deg) (값은 튜닝 필요)
-float angle_threshold_LH = 10.0f; // 왼쪽 착지 감지 다리 각도 차이 (deg) (값은 튜닝 필요)
-float vel_threshold_RH = 4.0f;    // 오른쪽 착지 감지 다리 각속도 (deg/s) (값은 튜닝 필요)
-float vel_threshold_LH = 5.0f;    // 왼쪽 착지 감지 다리 각속도 (deg/s) (값은 튜닝 필요)
-
+/* ------------------- assist.c 전용 변수 ------------------ */
+// *** 사용자 정의 충격 완화(보조) 알고리즘 전용 변수들 ***
+float user_defined_K = 0.5f;      // 중력보상 게인
+float assist_gain_RH = 1.5f;      // 오른쪽 보조 게인
+float assist_gain_LH = 1.5f;      // 왼쪽 보조 게인
+float angle_threshold_RH = 10.0f; // 오른쪽 착지 감지 각도 임계값 [deg]
+float angle_threshold_LH = 10.0f; // 왼쪽 착지 감지 각도 임계값 [deg]
+float vel_threshold_RH = 4.0f;    // 오른쪽 착지 감지 속도 임계값 [deg/s]
+float vel_threshold_LH = 5.0f;    // 왼쪽 착지 감지 속도 임계값 [deg/s]
 
 static bool first_run_assist = true;
 
