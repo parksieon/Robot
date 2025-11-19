@@ -155,8 +155,8 @@ float ANGLE_EPSILON = 0.1f;  // 약 5.7도
 float MAX_GAIN = 10.0f;      // gain 상한
 
 float w_threshold = -5.0f;
-float gain_vel_threshold = 0.5f;
-float gain_angle_threshold = 0.5f;
+float gain_vel_level = 0.5f;
+float gain_angle_level = 0.5f;
 
 /* -------------------- STATE FUNCTION -------------------- */
 static void StateOff_Run(void);
@@ -494,7 +494,7 @@ static void StateEnable_Run(void)
 					float abs_th_R = sabsf(th_R);
     				float gain_angle_R = 1.0f / (abs_th_R + ANGLE_EPSILON);
 
-					float gain_R = gain_vel_R * gain_vel_threshold + gain_angle_R * gain_angle_threshold;
+					float gain_R = gain_vel_R * gain_vel_level + gain_angle_R * gain_angle_level;
 					gain_R = clampf(gain_R, 1.0f, MAX_GAIN);
 
 					iR_cmd += gain_R;
@@ -507,7 +507,7 @@ static void StateEnable_Run(void)
 					float abs_th_L = sabsf(th_L);
     				float gain_angle_L = 1.0f / (abs_th_L + ANGLE_EPSILON);
 
-    				float gain_L = gain_vel_L * gain_vel_threshold + gain_angle_L * gain_angle_threshold;
+    				float gain_L = gain_vel_L * gain_vel_level + gain_angle_L * gain_angle_level;
     				gain_L = clampf(gain_L, 1.0f, MAX_GAIN);
 
 					iL_cmd += gain_L;

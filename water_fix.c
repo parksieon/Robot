@@ -155,8 +155,8 @@ float ANGLE_EPSILON = 0.1f;  // 약 5.7도
 float MAX_GAIN = 10.0f;      // gain 상한
 
 float w_threshold = -5.0f;
-float gain_vel_threshold = 0.5f;
-float gain_angle_threshold = 0.5f;
+float gain_vel_level = 0.5f;
+float gain_angle_level = 0.5f;
 float GainAdd = 1.0f;
 
 /* -------------------- STATE FUNCTION -------------------- */
@@ -458,15 +458,43 @@ static void StateEnable_Run(void)
              /* 4) 수중 저항 전류(연속형 soft-sat) */
              float iR_tgt = hydro_drag_current(&gR, wR);
              float iL_tgt = hydro_drag_current(&gL, wL);
+             
+            /* 5) 20도 -> 0도 될 때 저항 */
+            if (w_est_R < w_threshold)
+            {
+               float abs_w_R = sabsf(w_est_R);
+               float gain_vel_R = abs_w_R / (abs_w_R + epsilon);
 
-             /* 5) 부드러운 램프-업(전원 투입 직후 서서히 ↑) */
+               float abs_th_R = sabsf(th_R);
+                float gain_angle_R = 1.0f / (abs_th_R + ANGLE_EPSILON);
+
+               float gain_R = gain_vel_R * gain_vel_level + gain_angle_R * gain_angle_level;
+               gain_R = clampf(gain_R, 1.0f, MAX_GAIN);
+
+               iR_tgt = iR_tgt * 0.5f + gain_R * 1.5f;
+            }
+            if (w_est_L < w_threshold)
+            {
+               float abs_w_L = sabsf(w_est_L);
+               float gain_vel_L = abs_w_L / (abs_w_L + epsilon);
+
+               float abs_th_L = sabsf(th_L);
+                float gain_angle_L = 1.0f / (abs_th_L + ANGLE_EPSILON);
+
+                float gain_L = gain_vel_L * gain_vel_level + gain_angle_L * gain_angle_level;
+                gain_L = clampf(gain_L, 1.0f, MAX_GAIN);
+
+               iL_tgt = iL_tgt * 0.5f + gain_L * 1.5f;
+            }
+
+             /* 6) 부드러운 램프-업(전원 투입 직후 서서히 ↑) */
              if (ramp < 1.f){
                  ramp += (DT / RAMP_RATE_S);             // RAMP_RATE_S초 동안 0→1
                  if (ramp > 1.f) ramp = 1.f;
              }
              iR_tgt *= ramp; iL_tgt *= ramp;
 
-             /* 6) Slew + Jerk 제한 (dI/dt, d²I/dt² 모두 제한) */
+             /* 7) Slew + Jerk 제한 (dI/dt, d²I/dt² 모두 제한) */
              float di_max = DI_LIMIT_A_S * DT;
              float dj_max = JERK_LIMIT_A_S2 * DT;        // 허용 저크 * dt
 
@@ -485,34 +513,6 @@ static void StateEnable_Run(void)
 
              i_prev_R = iR_cmd; di_prev_R = di_R;
              i_prev_L = iL_cmd; di_prev_L = di_L;
-
-         /* 20도 -> 0도 될 때 저항 */
-            if (w_est_R < w_threshold)
-            {
-               float abs_w_R = sabsf(w_est_R);
-               float gain_vel_R = abs_w_R / (abs_w_R + epsilon);
-
-               float abs_th_R = sabsf(th_R);
-                float gain_angle_R = 1.0f / (abs_th_R + ANGLE_EPSILON);
-
-               float gain_R = gain_vel_R * gain_vel_threshold + gain_angle_R * gain_angle_threshold;
-               gain_R = clampf(gain_R, 1.0f, MAX_GAIN);
-
-               iR_cmd += gain_R;
-            }
-            if (w_est_L < w_threshold)
-            {
-               float abs_w_L = sabsf(w_est_L);
-               float gain_vel_L = abs_w_L / (abs_w_L + epsilon);
-
-               float abs_th_L = sabsf(th_L);
-                float gain_angle_L = 1.0f / (abs_th_L + ANGLE_EPSILON);
-
-                float gain_L = gain_vel_L * gain_vel_threshold + gain_angle_L * gain_angle_threshold;
-                gain_L = clampf(gain_L, 1.0f, MAX_GAIN);
-
-               iL_cmd += gain_L;
-            }
 
              /* 7) 사용자 정의 전류 출력 (최종 합산/assist_level/±9A 포화는 기존 함수) */
              UserDefinedCtrl_RH.control_input = iR_cmd * GainAdd;
